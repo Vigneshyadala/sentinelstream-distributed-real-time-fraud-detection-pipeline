@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SentinelStream — Real-Time Fraud Detection Pipeline</title>
+<meta name="description" content="A distributed, real-time financial fraud detection pipeline built by Vignesh Yadala — Kafka, TimescaleDB, MinIO, and a sliding-window detection engine." />
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+<style>
+  /* ───────────────────────────── DESIGN TOKENS ───────────────────────────── */
+  :root{
+    --bg:            #160a0e;
+    --bg-deep:       #0f0609;
+    --bg-grid:       #1a0b10;
+    --panel:         #2a1620;
+    --panel-alt:     #341b27;
+    --border:        rgba(255, 178, 150, 0.14);
+    --border-soft:   rgba(255, 178, 150, 0.08);
+    --border-bright: rgba(255, 59, 92, 0.35);
+
+    --text:          #fbf7f5;
+    --text-muted:    #c9aab0;
+    --text-dim:      #8a6670;
+
+    --teal:          #ff3b5c;   /* clear / normal signal — now crimson */
+    --teal-dim:      #3a1420;
+    --alert:         #ffb020;   /* fraud signal — amber, so it pops against crimson base */
+    --alert-dim:     #3a2a10;
+    --amber:         #ffb088;   /* rose-gold, secondary accent */
+
+    --font-display: 'Space Grotesk', sans-serif;
+    --font-body:    'Inter', sans-serif;
+    --font-mono:    'JetBrains Mono', monospace;
+
+    --radius: 10px;
+  }
+
+  *{ box-sizing:border-box; margin:0; padding:0; }
+
+  html{ scroll-behavior:smooth; }
+
+  body{
+    background:
+      radial-gradient(ellipse 80% 50% at 50% -10%, rgba(255,59,92,0.16), transparent),
+      radial-gradient(ellipse 60% 50% at 90% 100%, rgba(255,176,136,0.08), transparent 60%),
+      var(--bg);
+    color:var(--text);
+    font-family:var(--font-body);
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+    min-height:100vh;
+    position:relative;
+    overflow-x:hidden;
+  }
+
+  a{ color:inherit; text-decoration:none; }
+
+  :focus-visible{
+    outline:2px solid var(--teal);
+    outline-offset:3px;
+    border-radius:4px;
+  }
+
+  ::selection{ background:var(--teal); color:#1a0208; }
+
+  .wrap{ max-width:1180px; margin:0 auto; padding:0 28px; position:relative; z-index:1; }
+
+  /* ───────────────────────────── AMBIENT BACKGROUND ───────────────────────────── */
+  .ambient{
+    position:fixed; inset:0; z-index:0; overflow:hidden; pointer-events:none;
+  }
+  .pulse-ring{
+    position:absolute; left:78%; top:8%;
+    width:40px; height:40px; border-radius:50%;
+    border:1px solid rgba(255,92,121,0.5);
+    animation:ringPulse 5s ease-out infinite;
+  }
+  .pulse-ring.r2{ animation-delay:1.6s; }
+  .pulse-ring.r3{ animation-delay:3.2s; }
+  @keyframes ringPulse{
+    0%{ width:40px; height:40px; opacity:0.8; border-color:rgba(255,92,121,0.45); }
+    100%{ width:640px; height:640px; opacity:0; border-color:rgba(255,59,92,0); }
+  }
+  .ember{
+    position:absolute; border-radius:50%; background:var(--amber); opacity:0.3;
+    animation:drift linear infinite;
+  }
+  @keyframes drift{
+    0%{ transform:translateY(0); opacity:0; }
+    10%{ opacity:0.4; }
+    90%{ opacity:0.25; }
+    100%{ transform:translateY(-100vh); opacity:0; }
+  }
+
+  /* ───────────────────────────── TOP BAR ───────────────────────────── */
+  .topbar{
+    position:sticky; top:0; z-index:50;
+    background:rgba(15,6,9,0.85);
+    backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--border-soft);
+  }
+  .topbar-inner{
+    max-width:1180px; margin:0 auto; padding:14px 28px;
+    display:flex; align-items:center; justify-content:space-between;
+    gap:20px;
+  }
+  .window-dots{ display:flex; gap:7px; }
+  .window-dots span{
+    width:11px; height:11px; border-radius:50%;
+    display:inline-block;
+  }
+  .window-dots span:nth-child(1){ background:#ff5f57; }
+  .window-dots span:nth-child(2){ background:#febc2e; }
+  .window-dots span:nth-child(3){ background:#28c840; }
+
+  .topbar-title{
+    font-family:var(--font-mono); font-size:13px; color:var(--text-muted);
+    letter-spacing:0.02em;
+    display:flex; align-items:center; gap:10px;
+  }
+  .topbar-title strong{ color:var(--text); font-weight:500; }
+
+  .topbar-nav{ display:flex; gap:26px; font-size:14px; color:var(--text-muted); }
+  .topbar-nav a{ transition:color .15s ease; }
+  .topbar-nav a:hover{ color:var(--teal); }
+
+  .topbar-cta{
+    font-family:var(--font-mono); font-size:12.5px; color:var(--text);
+    border:1px solid var(--border); padding:7px 14px; border-radius:7px;
+    display:flex; align-items:center; gap:8px; white-space:nowrap;
+    transition:border-color .15s ease, color .15s ease;
+  }
+  .topbar-cta:hover{ border-color:var(--teal); color:var(--teal); }
+
+  @media (max-width:820px){ .topbar-nav{ display:none; } }
+
+  /* ───────────────────────────── HERO ───────────────────────────── */
+  .hero{
+    padding:88px 0 64px;
+    display:grid; grid-template-columns:1.1fr 0.9fr; gap:56px; align-items:center;
+  }
+  @media (max-width:960px){ .hero{ grid-template-columns:1fr; padding:56px 0 40px; } }
+
+  .badge-row{ display:flex; align-items:center; gap:12px; margin-bottom:22px; flex-wrap:wrap; }
+
+  .eyebrow{
+    font-family:var(--font-mono); font-size:12px; letter-spacing:0.14em;
+    color:var(--teal); text-transform:uppercase;
+    display:flex; align-items:center; gap:8px;
+  }
+  .eyebrow::before{
+    content:''; width:7px; height:7px; border-radius:50%;
+    background:var(--teal); box-shadow:0 0 10px var(--teal);
+    animation:pulse-dot 2s ease-in-out infinite;
+  }
+  @keyframes pulse-dot{ 0%,100%{ opacity:1; } 50%{ opacity:0.35; } }
+
+  /* Dev badge — brand-mark style, matching Pulse's identity chip */
+  .dev-badge{
+    font-family:var(--font-mono); font-size:11px; letter-spacing:0.06em;
+    color:var(--text-dim); text-transform:none;
+    border:1px solid var(--border); border-radius:100px; padding:4px 12px 4px 4px;
+    display:flex; align-items:center; gap:8px;
+    background:rgba(255,59,92,0.05);
+  }
+  .dev-badge .mark{
+    width:20px; height:20px; border-radius:50%;
+    background:linear-gradient(135deg, var(--teal) 0%, #c4203d 100%);
+    display:flex; align-items:center; justify-content:center;
+    position:relative; flex-shrink:0;
+    box-shadow:0 0 10px rgba(255,59,92,0.5);
+  }
+  .dev-badge .mark::after{
+    content:''; position:absolute; width:6px; height:6px; border-radius:50%;
+    background:#4ade80; right:-1px; bottom:-1px; border:1.5px solid var(--bg-deep);
+  }
+  .dev-badge a{ color:var(--text); font-weight:600; transition:color .15s ease; }
+  .dev-badge a:hover{ color:var(--teal); }
+
+  h1.hero-headline{
+    font-family:var(--font-display); font-weight:600;
+    font-size:clamp(2.1rem, 4.4vw, 3.4rem);
+    line-height:1.08; letter-spacing:-0.01em;
+    margin-bottom:20px;
+  }
+  h1.hero-headline .accent{
+    background:linear-gradient(95deg, var(--teal), var(--amber));
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+  }
+  h1.hero-headline .strike-wrap{ position:relative; display:inline-block; }
+
+  .hero-sub{
+    font-size:16.5px; color:var(--text-muted); max-width:520px; margin-bottom:32px;
+  }
+  .hero-sub code{ font-family:var(--font-mono); color:var(--text); background:var(--panel-alt); padding:1px 6px; border-radius:4px; font-size:14px; }
+
+  .hero-ctas{ display:flex; gap:12px; margin-bottom:44px; flex-wrap:wrap; }
+  .btn{
+    font-family:var(--font-body); font-weight:600; font-size:14px;
+    padding:12px 20px; border-radius:8px; display:inline-flex; align-items:center; gap:8px;
+    transition:transform .15s ease, box-shadow .15s ease, border-color .15s ease;
+  }
+  .btn-primary{ background:linear-gradient(135deg, var(--teal) 0%, #c4203d 100%); color:#fff; }
+  .btn-primary:hover{ transform:translateY(-1px); box-shadow:0 8px 24px -8px rgba(255,59,92,0.55); }
+  .btn-ghost{ border:1px solid var(--border); color:var(--text); }
+  .btn-ghost:hover{ border-color:var(--text-muted); transform:translateY(-1px); }
+
+  /* Live stat ticker */
+  .stat-ticker{
+    display:grid; grid-template-columns:repeat(4,1fr); gap:1px;
+    background:var(--border); border:1px solid var(--border); border-radius:var(--radius);
+    overflow:hidden;
+  }
+  .stat-cell{ background:var(--panel); padding:16px 18px; }
+  .stat-value{
+    font-family:var(--font-mono); font-size:22px; font-weight:700; color:var(--text);
+    display:flex; align-items:baseline; gap:4px;
+  }
+  .stat-value.is-alert{ color:var(--alert); }
+  .stat-unit{ font-size:12px; color:var(--text-dim); font-weight:400; }
+  .stat-label{ font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.06em; margin-top:5px; }
+  @media (max-width:640px){ .stat-ticker{ grid-template-columns:repeat(2,1fr); } }
+
+  /* ── Hero pipeline graphic ── */
+  .hero-graphic{
+    border:1px solid var(--border); border-radius:14px; background:var(--panel);
+    padding:22px; position:relative; overflow:hidden;
+  }
+  .hero-graphic svg{ width:100%; height:auto; display:block; }
+  .flow-dot{ animation:flow linear infinite; }
+  @keyframes flow{ to{ offset-distance:100%; } }
+
+  .conn-status{
+    position:absolute; top:14px; right:16px;
+    font-family:var(--font-mono); font-size:10.5px; letter-spacing:0.05em;
+    padding:4px 9px; border-radius:100px; border:1px solid var(--border);
+    display:flex; align-items:center; gap:6px; color:var(--text-muted);
+  }
+  .conn-status .dot{ width:6px; height:6px; border-radius:50%; background:var(--alert); }
+  .conn-status.live .dot{ background:var(--teal); box-shadow:0 0 8px var(--teal); }
+  .conn-status.live{ color:var(--teal); }
+
+  /* ───────────────────────────── SECTION HEADERS ───────────────────────────── */
+  section{ padding:60px 0; border-top:1px solid var(--border-soft); }
+  .section-head{ margin-bottom:36px; }
+  .section-tag{
+    font-family:var(--font-mono); font-size:11.5px; color:var(--teal);
+    letter-spacing:0.12em; text-transform:uppercase; margin-bottom:10px; display:block;
+  }
+  .section-title{
+    font-family:var(--font-display); font-size:clamp(1.5rem,2.6vw,2.1rem); font-weight:600;
+  }
+  .section-desc{ color:var(--text-muted); max-width:600px; margin-top:10px; font-size:15px; }
+
+  /* ───────────────────────────── LIVE TERMINAL (signature element) ───────────────────────────── */
+  .terminal{
+    border:1px solid var(--border); border-radius:12px; background:#0d0308;
+    overflow:hidden; box-shadow:0 30px 60px -30px rgba(0,0,0,0.7);
+  }
+  .terminal-head{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:10px 16px; background:var(--panel-alt); border-bottom:1px solid var(--border);
+  }
+  .terminal-head-title{ font-family:var(--font-mono); font-size:12px; color:var(--text-muted); }
+  .terminal-body{
+    font-family:var(--font-mono); font-size:13px; padding:18px 20px;
+    height:340px; overflow-y:auto; display:flex; flex-direction:column; gap:6px;
+  }
+  .terminal-body::-webkit-scrollbar{ width:8px; }
+  .terminal-body::-webkit-scrollbar-thumb{ background:var(--border); border-radius:4px; }
+
+  .log-line{
+    display:flex; gap:10px; color:var(--text-muted); white-space:pre;
+    opacity:0; animation:line-in .3s ease forwards;
+    flex-wrap:wrap;
+  }
+  @keyframes line-in{ from{ opacity:0; transform:translateY(-3px);} to{ opacity:1; transform:translateY(0);} }
+  .log-line .ts{ color:var(--text-dim); }
+  .log-line .tag{ font-weight:700; }
+  .log-line.ok .tag{ color:var(--teal); }
+  .log-line.fraud{
+    color:var(--alert);
+    background:rgba(255,176,32,0.08);
+    border-left:2px solid var(--alert);
+    padding-left:8px;
+    animation:line-in .3s ease forwards, alert-glow 1.4s ease-in-out 1;
+  }
+  .log-line.fraud .tag{ color:var(--alert); }
+  @keyframes alert-glow{
+    0%{ box-shadow:0 0 0 rgba(255,176,32,0); }
+    30%{ box-shadow:0 0 18px rgba(255,176,32,0.25); }
+    100%{ box-shadow:0 0 0 rgba(255,176,32,0); }
+  }
+
+  /* ───────────────────────────── DETECTION RULES ───────────────────────────── */
+  .rule-grid{ display:grid; grid-template-columns:repeat(3,1fr); gap:18px; }
+  @media (max-width:860px){ .rule-grid{ grid-template-columns:1fr; } }
+  .rule-card{
+    border:1px solid var(--border); border-radius:12px; padding:24px; background:var(--panel);
+    position:relative; transition:border-color .2s ease, transform .2s ease;
+  }
+  .rule-card:hover{ border-color:var(--teal); transform:translateY(-2px); }
+  .rule-index{ font-family:var(--font-mono); font-size:12px; color:var(--text-dim); margin-bottom:14px; }
+  .rule-icon{ margin-bottom:16px; color:var(--teal); }
+  .rule-title{ font-family:var(--font-display); font-size:18px; font-weight:600; margin-bottom:8px; }
+  .rule-desc{ color:var(--text-muted); font-size:14px; margin-bottom:16px; }
+  .rule-threshold{
+    font-family:var(--font-mono); font-size:12.5px; color:var(--alert);
+    background:rgba(255,176,32,0.08); border:1px solid rgba(255,176,32,0.2);
+    padding:6px 10px; border-radius:6px; display:inline-block;
+  }
+
+  /* ───────────────────────────── ARCHITECTURE ───────────────────────────── */
+  .arch-diagram{
+    border:1px solid var(--border); border-radius:14px; background:var(--panel);
+    padding:32px 20px; overflow-x:auto;
+  }
+  .arch-diagram svg{ min-width:760px; width:100%; height:auto; display:block; margin:0 auto; }
+
+  .stack-badges{ display:flex; flex-wrap:wrap; gap:10px; margin-top:24px; }
+  .stack-badge{
+    font-family:var(--font-mono); font-size:12.5px; color:var(--text-muted);
+    border:1px solid var(--border); padding:7px 12px; border-radius:100px;
+    display:flex; align-items:center; gap:7px;
+  }
+  .stack-badge .sq{ width:7px; height:7px; border-radius:2px; background:var(--teal); }
+
+  /* ───────────────────────────── FOOTER / CREDITS ───────────────────────────── */
+  footer{ border-top:1px solid var(--border-soft); padding:56px 0 40px; position:relative; z-index:1; }
+  .footer-grid{
+    display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:32px;
+  }
+  .signature-label{
+    font-family:var(--font-mono); font-size:11px; color:var(--text-dim);
+    text-transform:uppercase; letter-spacing:0.14em; margin-bottom:10px;
+  }
+  .signature-name{
+    font-family:var(--font-display); font-size:clamp(1.8rem,4vw,2.6rem);
+    font-style:italic; font-weight:500; letter-spacing:-0.01em;
+    background:linear-gradient(90deg, var(--text), var(--teal));
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+  }
+  .footer-links{ display:flex; gap:18px; font-size:14px; }
+  .footer-links a{
+    color:var(--text-muted); border-bottom:1px solid transparent; padding-bottom:2px;
+    transition:color .15s ease, border-color .15s ease;
+  }
+  .footer-links a:hover{ color:var(--teal); border-color:var(--teal); }
+  .footer-meta{
+    margin-top:28px; padding-top:22px; border-top:1px solid var(--border-soft);
+    font-family:var(--font-mono); font-size:11.5px; color:var(--text-dim);
+    display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px;
+  }
+
+  @media (prefers-reduced-motion: reduce){
+    *{ animation-duration:0.001ms !important; animation-iteration-count:1 !important; transition-duration:0.001ms !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="ambient" id="ambient">
+  <div class="pulse-ring r1"></div>
+  <div class="pulse-ring r2"></div>
+  <div class="pulse-ring r3"></div>
+</div>
+
+<!-- ═══════════════════════════ TOP BAR ═══════════════════════════ -->
+<div class="topbar">
+  <div class="topbar-inner">
+    <div class="topbar-title">
+      <span class="window-dots"><span></span><span></span><span></span></span>
+      <span><strong>sentinelstream</strong> — fraud_detection.pipeline</span>
+    </div>
+    <nav class="topbar-nav">
+      <a href="#feed">Live Feed</a>
+      <a href="#rules">Detection Rules</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#credits">Credits</a>
+    </nav>
+    <a class="topbar-cta" href="https://github.com/Vigneshyadala" target="_blank" rel="noopener">
+      ↗ github.com/Vigneshyadala
+    </a>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <!-- ═══════════════════════════ HERO ═══════════════════════════ -->
+  <section class="hero" style="border-top:none;">
+    <div>
+      <div class="badge-row">
+        <span class="eyebrow">Distributed · Real-Time · Lambda Architecture</span>
+        <span class="dev-badge"><span class="mark"></span>built by <a href="https://vigneshyadala.github.io/portfolio/" target="_blank" rel="noopener">Vignesh Yadala</a></span>
+      </div>
+
+      <h1 class="hero-headline">
+        Catching fraud <span class="accent">before</span> the transaction clears.
+      </h1>
+
+      <p class="hero-sub">
+        SentinelStream ingests card transactions through <code>Kafka</code>, scores every event
+        against three sliding-window rules in-flight, and dual-routes the result: alerts hit
+        <code>TimescaleDB</code> in milliseconds, raw history lands in a <code>MinIO</code> data lake as Parquet.
+      </p>
+
+      <div class="hero-ctas">
+        <a class="btn btn-primary" href="#feed">Watch the live feed ↓</a>
+        <a class="btn btn-ghost" href="#architecture">View architecture</a>
+      </div>
+
+      <div class="stat-ticker" id="stat-ticker">
+        <div class="stat-cell">
+          <div class="stat-value"><span id="stat-tps">—</span><span class="stat-unit">tx/s</span></div>
+          <div class="stat-label">Throughput</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-value"><span id="stat-total">—</span></div>
+          <div class="stat-label">Transactions Seen</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-value is-alert"><span id="stat-alerts">—</span></div>
+          <div class="stat-label">Fraud Alerts</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-value"><span id="stat-latency">—</span><span class="stat-unit">ms</span></div>
+          <div class="stat-label">Detection Latency</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="hero-graphic">
+      <div class="conn-status" id="conn-status"><span class="dot"></span><span id="conn-status-label">connecting…</span></div>
+      <svg viewBox="0 0 460 360" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <path id="path1" d="M60,60 C120,60 100,150 160,150" />
+          <path id="path2" d="M160,150 C220,150 200,60 260,60" />
+          <path id="path3" d="M160,150 C220,150 200,240 260,240" />
+          <path id="path4" d="M260,60 C320,60 340,150 400,150" />
+          <path id="path5" d="M260,240 C320,240 340,150 400,150" />
+        </defs>
+        <g stroke="#3a1420" stroke-width="1.5" fill="none">
+          <use href="#path1" /><use href="#path2" /><use href="#path3" /><use href="#path4" /><use href="#path5" />
+        </g>
+        <!-- nodes -->
+        <g font-family="JetBrains Mono, monospace" font-size="10.5" fill="#c9aab0">
+          <circle cx="60" cy="60" r="20" fill="#2a1620" stroke="#ff3b5c" stroke-width="1.5"/>
+          <text x="60" y="94" text-anchor="middle" fill="#fbf7f5">Producer</text>
+
+          <circle cx="160" cy="150" r="22" fill="#2a1620" stroke="#ff3b5c" stroke-width="1.5"/>
+          <text x="160" y="184" text-anchor="middle" fill="#fbf7f5">Kafka</text>
+
+          <circle cx="260" cy="60" r="20" fill="#2a1620" stroke="#ff3b5c" stroke-width="1.5"/>
+          <text x="260" y="94" text-anchor="middle" fill="#fbf7f5">Processor</text>
+
+          <circle cx="260" cy="240" r="20" fill="#2a1620" stroke="#ffb020" stroke-width="1.5"/>
+          <text x="260" y="274" text-anchor="middle" fill="#fbf7f5">Rules Engine</text>
+
+          <circle cx="400" cy="150" r="22" fill="#2a1620" stroke="#ffb088" stroke-width="1.5"/>
+          <text x="400" y="184" text-anchor="middle" fill="#fbf7f5">DB / S3</text>
+        </g>
+        <!-- flowing pulse dots -->
+        <circle r="3.4" fill="#ff3b5c">
+          <animateMotion dur="2.6s" repeatCount="indefinite"><mpath href="#path1"/></animateMotion>
+        </circle>
+        <circle r="3.4" fill="#ff3b5c">
+          <animateMotion dur="2.6s" begin="0.4s" repeatCount="indefinite"><mpath href="#path2"/></animateMotion>
+        </circle>
+        <circle r="3.4" fill="#ffb020">
+          <animateMotion dur="2.6s" begin="0.8s" repeatCount="indefinite"><mpath href="#path3"/></animateMotion>
+        </circle>
+        <circle r="3.4" fill="#ff3b5c">
+          <animateMotion dur="2.6s" begin="1.2s" repeatCount="indefinite"><mpath href="#path4"/></animateMotion>
+        </circle>
+        <circle r="3.4" fill="#ffb088">
+          <animateMotion dur="2.6s" begin="1.6s" repeatCount="indefinite"><mpath href="#path5"/></animateMotion>
+        </circle>
+      </svg>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════ LIVE FEED ═══════════════════════════ -->
+  <section id="feed">
+    <div class="section-head">
+      <span class="section-tag">01 · Live Signal</span>
+      <h2 class="section-title">tail -f fraud_stream.log</h2>
+      <p class="section-desc">
+        Every line is a transaction moving through the pipeline right now. Clean transactions
+        stream quietly in crimson; anything the rules engine flags surfaces in amber, with the rule
+        that tripped it.
+      </p>
+    </div>
+
+    <div class="terminal">
+      <div class="terminal-head">
+        <span class="terminal-head-title">vignesh@sentinelstream — fraud_stream.log</span>
+        <span class="terminal-head-title" id="terminal-clock">--:--:--</span>
+      </div>
+      <div class="terminal-body" id="terminal-body"></div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════ DETECTION RULES ═══════════════════════════ -->
+  <section id="rules">
+    <div class="section-head">
+      <span class="section-tag">02 · Detection Engine</span>
+      <h2 class="section-title">Three sliding-window rules, evaluated per event</h2>
+      <p class="section-desc">
+        No batch jobs, no cron. Every rule re-evaluates the instant a new transaction lands,
+        against a rolling window of that user's recent history held in memory.
+      </p>
+    </div>
+
+    <div class="rule-grid">
+      <div class="rule-card">
+        <div class="rule-index">RULE 01</div>
+        <svg class="rule-icon" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+        <div class="rule-title">Velocity Burst</div>
+        <div class="rule-desc">Flags a user firing an abnormal number of transactions in a short window — the signature of card-testing bots.</div>
+        <div class="rule-threshold">&gt; 3 txns / 10s window</div>
+      </div>
+
+      <div class="rule-card">
+        <div class="rule-index">RULE 02</div>
+        <svg class="rule-icon" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 2v20M2 12h20"/><circle cx="12" cy="12" r="9"/></svg>
+        <div class="rule-title">High-Amount Outlier</div>
+        <div class="rule-desc">Any single transaction that clears an absolute dollar threshold is flagged for review regardless of user history.</div>
+        <div class="rule-threshold">amount &gt; $10,000</div>
+      </div>
+
+      <div class="rule-card">
+        <div class="rule-index">RULE 03</div>
+        <svg class="rule-icon" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
+        <div class="rule-title">Impossible Travel</div>
+        <div class="rule-desc">Compares consecutive locations for the same user via haversine distance — flags speeds no commercial flight can achieve.</div>
+        <div class="rule-threshold">implied speed &gt; 900 km/h</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════ ARCHITECTURE ═══════════════════════════ -->
+  <section id="architecture">
+    <div class="section-head">
+      <span class="section-tag">03 · System Design</span>
+      <h2 class="section-title">Lambda architecture: speed layer + batch layer</h2>
+      <p class="section-desc">
+        Flagged alerts take the fast path into TimescaleDB for sub-second queries. Every raw
+        event — fraud or not — also lands in a MinIO data lake as partitioned Parquet, for
+        offline model training and audit trails.
+      </p>
+    </div>
+
+    <div class="arch-diagram">
+      <svg viewBox="0 0 760 220" xmlns="http://www.w3.org/2000/svg" font-family="JetBrains Mono, monospace" font-size="11">
+        <!-- connecting lines -->
+        <g stroke="#3a1420" stroke-width="1.5" fill="none">
+          <path d="M110,60 H190" /> <!-- producer -> kafka -->
+          <path d="M270,60 H350" /> <!-- kafka -> processor -->
+          <path d="M430,60 C480,60 480,40 520,40" /> <!-- processor -> timescale -->
+          <path d="M430,60 C480,60 480,90 520,90" /> <!-- processor -> minio -->
+          <path d="M600,40 C650,40 650,140 700,140" /> <!-- timescale -> grafana -->
+          <path d="M600,90 H700" opacity="0.4" stroke-dasharray="3 3"/> <!-- minio (dashed, offline) -->
+        </g>
+
+        <!-- Producer -->
+        <rect x="20" y="35" width="90" height="50" rx="8" fill="#2a1620" stroke="#ff3b5c"/>
+        <text x="65" y="65" text-anchor="middle" fill="#fbf7f5">producer.py</text>
+
+        <!-- Kafka -->
+        <rect x="190" y="35" width="80" height="50" rx="8" fill="#2a1620" stroke="#ff3b5c"/>
+        <text x="230" y="58" text-anchor="middle" fill="#fbf7f5">Kafka</text>
+        <text x="230" y="72" text-anchor="middle" fill="#c9aab0" font-size="9.5">transactions</text>
+
+        <!-- Processor -->
+        <rect x="350" y="35" width="80" height="50" rx="8" fill="#2a1620" stroke="#ff3b5c"/>
+        <text x="390" y="58" text-anchor="middle" fill="#fbf7f5">processor.py</text>
+        <text x="390" y="72" text-anchor="middle" fill="#c9aab0" font-size="9.5">sliding window</text>
+
+        <!-- TimescaleDB -->
+        <rect x="520" y="15" width="80" height="50" rx="8" fill="#2a1620" stroke="#ffb020"/>
+        <text x="560" y="38" text-anchor="middle" fill="#fbf7f5">Timescale</text>
+        <text x="560" y="52" text-anchor="middle" fill="#c9aab0" font-size="9.5">speed layer</text>
+
+        <!-- MinIO -->
+        <rect x="520" y="65" width="80" height="50" rx="8" fill="#2a1620" stroke="#ffb088"/>
+        <text x="560" y="88" text-anchor="middle" fill="#fbf7f5">MinIO</text>
+        <text x="560" y="102" text-anchor="middle" fill="#c9aab0" font-size="9.5">batch layer</text>
+
+        <!-- Grafana / Dashboard -->
+        <rect x="690" y="115" width="70" height="50" rx="8" fill="#2a1620" stroke="#ff3b5c"/>
+        <text x="725" y="138" text-anchor="middle" fill="#fbf7f5" font-size="10">Grafana /</text>
+        <text x="725" y="150" text-anchor="middle" fill="#fbf7f5" font-size="10">Dashboard</text>
+
+        <!-- moving pulses -->
+        <circle r="3" fill="#ff3b5c"><animateMotion dur="2s" repeatCount="indefinite" path="M110,60 H190"/></circle>
+        <circle r="3" fill="#ff3b5c"><animateMotion dur="2s" begin="0.3s" repeatCount="indefinite" path="M270,60 H350"/></circle>
+        <circle r="3" fill="#ffb020"><animateMotion dur="2s" begin="0.6s" repeatCount="indefinite" path="M430,60 C480,60 480,40 520,40"/></circle>
+        <circle r="3" fill="#ffb088"><animateMotion dur="2s" begin="0.9s" repeatCount="indefinite" path="M430,60 C480,60 480,90 520,90"/></circle>
+        <circle r="3" fill="#ff3b5c"><animateMotion dur="2s" begin="1.2s" repeatCount="indefinite" path="M600,40 C650,40 650,140 700,140"/></circle>
+      </svg>
+    </div>
+
+    <div class="stack-badges">
+      <span class="stack-badge"><span class="sq"></span>Apache Kafka</span>
+      <span class="stack-badge"><span class="sq"></span>TimescaleDB</span>
+      <span class="stack-badge"><span class="sq"></span>MinIO (S3)</span>
+      <span class="stack-badge"><span class="sq"></span>FastAPI</span>
+      <span class="stack-badge"><span class="sq"></span>Grafana</span>
+      <span class="stack-badge"><span class="sq"></span>Docker Compose</span>
+      <span class="stack-badge"><span class="sq"></span>Python 3.11</span>
+    </div>
+  </section>
+
+</div>
+
+<!-- ═══════════════════════════ FOOTER / CREDITS ═══════════════════════════ -->
+<footer id="credits">
+  <div class="wrap">
+    <div class="footer-grid">
+      <div>
+        <div class="signature-label">Designed &amp; engineered by</div>
+        <div class="signature-name">Vignesh Yadala</div>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/Vigneshyadala" target="_blank" rel="noopener">GitHub ↗</a>
+        <a href="https://vigneshyadala.github.io/portfolio/" target="_blank" rel="noopener">Portfolio ↗</a>
+      </div>
+    </div>
+    <div class="footer-meta">
+      <span>SENTINELSTREAM — DISTRIBUTED REAL-TIME FRAUD DETECTION PIPELINE</span>
+      <span>© <span id="year"></span> Vignesh Yadala. Built for portfolio &amp; educational use.</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+(function(){
+  "use strict";
+
+  document.getElementById('year').textContent = new Date().getFullYear();
+
+  // ambient embers
+  const ambient = document.getElementById('ambient');
+  for(let i=0;i<22;i++){
+    const p = document.createElement('div');
+    p.className = 'ember';
+    const size = 2 + Math.random()*3;
+    p.style.width = size+'px';
+    p.style.height = size+'px';
+    p.style.left = Math.random()*100+'%';
+    p.style.bottom = '-10px';
+    p.style.animationDuration = (11 + Math.random()*14)+'s';
+    p.style.animationDelay = (Math.random()*14)+'s';
+    ambient.appendChild(p);
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Configuration: point this at your locally running api.py.
+  // If it can't be reached (e.g. this page is hosted on GitHub Pages
+  // with no local backend running), the dashboard falls back to a
+  // self-contained simulation so it still looks alive for visitors.
+  // ─────────────────────────────────────────────────────────────────
+  const API_BASE = (new URLSearchParams(location.search).get('api')) || 'http://localhost:8000';
+  const FETCH_TIMEOUT_MS = 1800;
+  const POLL_INTERVAL_MS = 3000;
+
+  const connStatusEl = document.getElementById('conn-status');
+  const connStatusLabel = document.getElementById('conn-status-label');
+  const terminalBody = document.getElementById('terminal-body');
+  const clockEl = document.getElementById('terminal-clock');
+
+  let liveMode = false;
+  let seenTxIds = new Set();
+
+  function setConnStatus(isLive){
+    liveMode = isLive;
+    connStatusEl.classList.toggle('live', isLive);
+    connStatusLabel.textContent = isLive ? 'live · api connected' : 'demo data (offline)';
+  }
+
+  function fmtNum(n){
+    if (n === undefined || n === null || isNaN(n)) return '—';
+    return Number(n).toLocaleString(undefined, {maximumFractionDigits: 1});
+  }
+
+  function updateStats(stats){
+    document.getElementById('stat-tps').textContent = fmtNum(stats.tps);
+    document.getElementById('stat-total').textContent = fmtNum(stats.total_transactions);
+    document.getElementById('stat-alerts').textContent = fmtNum(stats.total_alerts);
+    document.getElementById('stat-latency').textContent = fmtNum(stats.avg_detection_ms);
+  }
+
+  function pushLogLine({ user_id, amount, location, fraud_reason }){
+    const line = document.createElement('div');
+    const isFraud = !!fraud_reason;
+    line.className = 'log-line ' + (isFraud ? 'fraud' : 'ok');
+    const time = new Date().toLocaleTimeString('en-US', { hour12:false });
+    const tag = isFraud ? `FLAGGED:${fraud_reason}` : 'OK';
+    line.innerHTML =
+      `<span class="ts">[${time}]</span>` +
+      `<span class="tag">${tag}</span>` +
+      `<span>user=${user_id} amount=$${Number(amount).toFixed(2)} loc="${location}"</span>`;
+    terminalBody.appendChild(line);
+    // Keep the log from growing unbounded
+    while (terminalBody.childElementCount > 120) {
+      terminalBody.removeChild(terminalBody.firstElementChild);
+    }
+    terminalBody.scrollTop = terminalBody.scrollHeight;
+  }
+
+  async function fetchJSON(path){
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try{
+      const res = await fetch(API_BASE + path, { signal: controller.signal });
+      if (!res.ok) throw new Error('bad response ' + res.status);
+      return await res.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function pollLive(){
+    try{
+      const [stats, alerts] = await Promise.all([
+        fetchJSON('/api/stats'),
+        fetchJSON('/api/alerts?limit=10'),
+      ]);
+      setConnStatus(true);
+      updateStats(stats);
+      alerts.reverse().forEach(a => {
+        if (!seenTxIds.has(a.transaction_id)) {
+          seenTxIds.add(a.transaction_id);
+          pushLogLine({ user_id:a.user_id, amount:a.amount, location:a.location, fraud_reason:a.fraud_reason });
+        }
+      });
+      return true;
+    } catch (err){
+      setConnStatus(false);
+      return false;
+    }
+  }
+
+  // ── Offline demo simulator (schema-matched, self-contained) ──
+  const DEMO_CITIES = ['New York, US','London, UK','Tokyo, JP','Mumbai, IN','Berlin, DE','Singapore, SG'];
+  const DEMO_REASONS = [null, null, null, null, null, null, 'VELOCITY', 'HIGH_AMOUNT', 'IMPOSSIBLE_TRAVEL'];
+  let demoTotals = { total_transactions: 812340, total_alerts: 4021, tps: 184, avg_detection_ms: 6.4 };
+
+  function tickDemo(){
+    const isFraud = DEMO_REASONS[Math.floor(Math.random()*DEMO_REASONS.length)];
+    const amount = isFraud === 'HIGH_AMOUNT'
+      ? (10000 + Math.random()*40000)
+      : (5 + Math.random()*480);
+    demoTotals.total_transactions += Math.floor(Math.random()*3)+1;
+    if (isFraud) demoTotals.total_alerts += 1;
+    demoTotals.tps = 150 + Math.random()*90;
+    demoTotals.avg_detection_ms = 4 + Math.random()*5;
+    updateStats(demoTotals);
+    pushLogLine({
+      user_id: 'user_' + String(Math.floor(Math.random()*50)).padStart(4,'0'),
+      amount,
+      location: DEMO_CITIES[Math.floor(Math.random()*DEMO_CITIES.length)],
+      fraud_reason: isFraud,
+    });
+  }
+
+  function startClock(){
+    setInterval(() => {
+      clockEl.textContent = new Date().toLocaleTimeString('en-US', { hour12:false });
+    }, 1000);
+  }
+
+  async function main(){
+    startClock();
+    const ok = await pollLive();
+    if (!ok){
+      // Seed the terminal with a few demo lines immediately, then keep ticking.
+      for (let i=0;i<6;i++) tickDemo();
+    }
+    setInterval(async () => {
+      if (liveMode){
+        const stillOk = await pollLive();
+        if (!stillOk) tickDemo(); // graceful fallback mid-session if API drops
+      } else {
+        const nowOk = await pollLive(); // keep retrying in case api.py starts later
+        if (!nowOk) tickDemo();
+      }
+    }, POLL_INTERVAL_MS);
+  }
+
+  main();
+})();
+</script>
+
+</body>
+</html>
